@@ -1012,7 +1012,7 @@ def make_initial_displaybox() -> DisplayBox:
             get_loader('uv_aligned_path'),
             get_loader('uv_path'),
             shifts=(max(-config['shift'], 0), 0, 0),
-            output_size=0.15,
+            output_size=0.50,
         )
     except FileNotFoundError as err:
         print(f'Could not find {err.args[0]}; please check paths')
@@ -1055,7 +1055,7 @@ def make_selectorbox(which: str, copy_from: Optional[SelectorBox] = None,
         return SelectorBox(
             get_loader(which), w=50, box_color=(0, 255, 255),
             auto_op=auto_op, cache_path=get_cache_path(which),
-            output_size=0.10, copy_from=copy_from, align_pipeline=align_pipe,
+            output_size=0.50, copy_from=copy_from, align_pipeline=align_pipe,
             marker_choice=marker_choice,
         )
 
