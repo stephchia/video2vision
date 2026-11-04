@@ -117,40 +117,142 @@ class DisplayBox(widgets.VBox):
     def t(self, t: int):
         self.buttons.t = t
 
-
 class ButtonPanel(widgets.HBox):
-    '''
-    This widget provides a set of buttons for paging forward and backward in a
-    video or set of images.
-    '''
+    """Previous/Next navigation with a one-based image number."""
+
     def __init__(self, call_func: Callable, min_t: int, max_t: int,
                  t: int = 0, clear_func: Optional[Callable] = None):
-        self.t, self.min_t, self.max_t = t, min_t, max_t
+        # Existing callers supply an exclusive upper bound.
+        if max_t <= min_t:
+            raise ValueError("No overlapping images to display.")
+
+        self.min_t, self.max_t = min_t, max_t - 1
         self._call_func = call_func
+        self._busy = 0
+        self._syncing = False
+        self._t = max(self.min_t, min(int(t), self.max_t))
 
-        buttons = []
-        for shift in [-100, -10, -1, 1, 10, 100]:
-            buttons.append(widgets.Button(description=f'{shift:+}'))
-            buttons[-1].on_click(self._get_call_func(shift))
+        self.previous = widgets.Button(description="← Previous")
+        self.next = widgets.Button(description="Next →")
+        self.number = widgets.BoundedIntText(
+            value=self._t - self.min_t + 1,
+            min=1,
+            max=max_t - min_t,
+            continuous_update=False,
+            layout=widgets.Layout(width="85px"),
+        )
+        self.clear = (
+            SimpleButton("Clear All", clear_func)
+            if clear_func is not None else None
+        )
 
-        if clear_func is not None:
-            buttons.append(SimpleButton('Clear All', clear_func))
+        children = [
+            self.previous,
+            widgets.Label("Image:"),
+            self.number,
+            widgets.Label(f"/ {max_t - min_t}"),
+            self.next,
+        ]
+        if self.clear is not None:
+            children.append(self.clear)
 
-        super().__init__(buttons)
+        super().__init__(children)
+        self.layout.align_items = "center"
+        self.layout.flex_flow = "row wrap"
+
+        self.previous.on_click(lambda _: self._go(self.t - 1))
+        self.next.on_click(lambda _: self._go(self.t + 1))
+        self.number.observe(self._number_changed, names="value")
+        self._sync()
+
+    @property
+    def t(self):
+        return self._t
+
+    @t.setter
+    def t(self, value):
+        self._t = max(self.min_t, min(int(value), self.max_t))
+        self._sync()
+
+    def _sync(self):
+        self._syncing = True
+        try:
+            self.number.value = self.t - self.min_t + 1
+            self.previous.disabled = (
+                bool(self._busy) or self.t == self.min_t
+            )
+            self.next.disabled = (
+                bool(self._busy) or self.t == self.max_t
+            )
+            self.number.disabled = bool(self._busy)
+            if self.clear is not None:
+                self.clear.disabled = bool(self._busy)
+        finally:
+            self._syncing = False
+
+    def _number_changed(self, change):
+        if not self._syncing:
+            self._go(self.min_t + change["new"] - 1)
+
+    def _go(self, target):
+        if self._busy:
+            return
+
+        old = self.t
+        self.t = target
+        if self.t == old:
+            return
+
+        try:
+            with self.disable():
+                self._call_func(self.t)
+        except Exception:
+            self.t = old
+            raise
 
     @contextmanager
     def disable(self):
-        for button in self.children:
-            button.disabled = True
-        yield
-        for button in self.children:
-            button.disabled = False
+        self._busy += 1
+        self._sync()
+        try:
+            yield
+        finally:
+            self._busy -= 1
+            self._sync()
+            
+# class ButtonPanel(widgets.HBox):
+#     '''
+#     This widget provides a set of buttons for paging forward and backward in a
+#     video or set of images.
+#     '''
+#     def __init__(self, call_func: Callable, min_t: int, max_t: int,
+#                  t: int = 0, clear_func: Optional[Callable] = None):
+#         self.t, self.min_t, self.max_t = t, min_t, max_t
+#         self._call_func = call_func
 
-    def _get_call_func(self, shift: int):
-        def on_click(b):
-            self.t = max(min(self.t + shift, self.max_t), self.min_t)
-            self._call_func(self.t)
-        return on_click
+#         buttons = []
+#         for shift in [-100, -10, -1, 1, 10, 100]:
+#             buttons.append(widgets.Button(description=f'{shift:+}'))
+#             buttons[-1].on_click(self._get_call_func(shift))
+
+#         if clear_func is not None:
+#             buttons.append(SimpleButton('Clear All', clear_func))
+
+#         super().__init__(buttons)
+
+#     @contextmanager
+#     def disable(self):
+#         for button in self.children:
+#             button.disabled = True
+#         yield
+#         for button in self.children:
+#             button.disabled = False
+
+#     def _get_call_func(self, shift: int):
+#         def on_click(b):
+#             self.t = max(min(self.t + shift, self.max_t), self.min_t)
+#             self._call_func(self.t)
+#         return on_click
 
 
 class GhostBox(DisplayBox):

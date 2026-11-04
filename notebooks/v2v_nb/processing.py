@@ -948,35 +948,131 @@ def make_example_linearization_images(line_op: v2v.ElementwiseOperator) \
 
     return make_displayable(image[..., :1], image[..., 1:])
 
-
 def make_final_displaybox() -> DisplayBox:
+    from functools import lru_cache
+
     config = get_config()
 
+    # Share TIFF reads between channel previews.
+    @lru_cache(maxsize=2)
+    def read_tiff(loader, t):
+        return loader.get_frame(t, for_display=False)
+
+    class TiffPreview:
+        def __init__(self, loader, band=None):
+            self.loader = loader
+            self.band = band
+            self.expected_size = loader.expected_size
+
+        def __len__(self):
+            return len(self.loader)
+
+        def get_frame(self, t, for_display=False):
+            image = read_tiff(self.loader, t)
+
+            if self.band is not None:
+                image = image[..., self.band:self.band + 1]
+
+            if for_display:
+                image = (255 * np.clip(image, 0, 1)).astype(np.uint8)
+
+            return image
+
     try:
-        if config.is_3band_out:
+        if config.out_extension.lower().lstrip('.') in {'tif', 'tiff'}:
+            for key in ('animal_out_path', 'human_out_path'):
+                if config[key] is None:
+                    raise ParamNotSet(key)
+
+            animal = v2v.Loader(
+                config['animal_out_path'],
+                config.image_size,
+                num_channels=config.num_out_bands,
+            )
+
+            if config.is_3band_out:
+                loaders = [TiffPreview(animal)]
+            else:
+                loaders = [
+                    TiffPreview(animal, b)
+                    for b in range(config.num_out_bands)
+                ]
+
+            human = TiffPreview(get_loader('human_out_path'))
+
+        elif config.is_3band_out:
             loaders = [get_loader('animal_out_path')]
+            human = get_loader('human_out_path')
 
         else:
-            # MP4 using our codec is saved as three-channel
+            # Existing behavior for separate-band outputs.
             n_c = 3 if config.is_video else 1
             loaders = [
-                v2v.Loader(os.path.join(config['animal_out_path'], f'*_{b}.*'),
-                           config.image_size, num_channels=n_c)
+                v2v.Loader(
+                    os.path.join(config['animal_out_path'], f'*_{b}.*'),
+                    config.image_size,
+                    num_channels=n_c,
+                )
                 for b in range(config.num_out_bands)
             ]
+            human = get_loader('human_out_path')
 
-        return DisplayBox(
-            *loaders, get_loader('human_out_path'),
-            output_size=0.25,
+        import ipywidgets as widgets
+
+        all_loaders = [*loaders, human]
+        labels = (
+            ["Animal view"] if len(loaders) == 1
+            else [f"Output band {b}" for b in range(len(loaders))]
+        ) + ["Human view"]
+
+        views = []
+        for loader, label in zip(all_loaders, labels):
+            w, h = loader.expected_size
+            view = DisplayBox(
+                loader,
+                output_size=(500, round(500 * h / w)),
+            )
+            # Hide individual navigation buttons.
+            # Preserve the existing preview widgets and hide its navigation buttons.
+            navigation = getattr(view, "buttons", None)
+            preview_widgets = tuple(
+                child for child in view.children
+                if child is not navigation
+            )
+            view.children = (widgets.Label(label), *preview_widgets)
+            view.layout.min_width = "0"
+            views.append(view)
+
+        from .displays import ButtonPanel
+
+        def update_views(t):
+            for view in views:
+                view.set_frame(t)
+
+        navigation = ButtonPanel(
+            call_func=update_views,
+            min_t=0,
+            max_t=min(len(loader) for loader in all_loaders),
+            t=0,
         )
+
+        grid = widgets.GridBox(
+            children=views,
+            layout=widgets.Layout(
+                grid_template_columns="repeat(2, minmax(0, 1fr))",
+                grid_gap="12px",
+                width="100%",
+            ),
+        )
+
+        return widgets.VBox([navigation, grid])
+
     except ParamNotSet as err:
         print(f'Please specify {PARAM_CAPTIONS[err.args[0]].lower()}.')
     except ImportError as err:
         print(f'{err.args[0]} Please install the module and try again.')
-        return
     except FileNotFoundError as err:
         print(f'Could not find {err.args[0]} - please check path.')
-        return
 
 
 def make_ghostbox() -> GhostBox:
