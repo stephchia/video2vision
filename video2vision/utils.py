@@ -391,21 +391,48 @@ def locate_aruco_markers(x: Dict, marker_ids: Optional[np.ndarray] = None):
     x = _coerce_to_dict(x)
     ts, corners, found_ids = [], [], []
 
-    # Function name changed in 4.7.0
+    
+    # Configure ArUco detector parameters
     if _CV2_VERSION >= (4, 7, 0):
         detector_params = cv2.aruco.DetectorParameters()
     else:
         detector_params = cv2.aruco.DetectorParameters_create()
-    detector_params.adaptiveThreshWinSizeMax = 256
-
-    # detectMarkers function was removed in 5.0.0.
-    if _CV2_VERSION >= (5, 0, 0):
-        detector = cv2.aruco.ArucoDetector(detectorParams=detector_params)
-        detector.setDictionary(_MARKER_DICTIONARY)
+    
+    # Improved detection for UV images
+    detector_params.adaptiveThreshWinSizeMin = 3
+    detector_params.adaptiveThreshWinSizeMax = 53
+    detector_params.adaptiveThreshWinSizeStep = 5
+    
+    # Construct detector with the specified parameters
+    if _CV2_VERSION >= (4, 7, 0):
+        detector = cv2.aruco.ArucoDetector(
+            _MARKER_DICTIONARY,
+            detector_params
+        )
         detect = detector.detectMarkers
     else:
         def detect(image):
-            return cv2.aruco.detectMarkers(image, _MARKER_DICTIONARY)
+            return cv2.aruco.detectMarkers(
+                image,
+                _MARKER_DICTIONARY,
+                parameters=detector_params
+            )
+
+    # # Function name changed in 4.7.0
+    # if _CV2_VERSION >= (4, 7, 0):
+    #     detector_params = cv2.aruco.DetectorParameters()
+    # else:
+    #     detector_params = cv2.aruco.DetectorParameters_create()
+    # detector_params.adaptiveThreshWinSizeMax = 256
+
+    # # detectMarkers function was removed in 5.0.0.
+    # if _CV2_VERSION >= (5, 0, 0):
+    #     detector = cv2.aruco.ArucoDetector(detectorParams=detector_params)
+    #     detector.setDictionary(_MARKER_DICTIONARY)
+    #     detect = detector.detectMarkers
+    # else:
+    #     def detect(image):
+    #         return cv2.aruco.detectMarkers(image, _MARKER_DICTIONARY)
 
     with _coerce_to_4dim(x):
         image = x['image']
@@ -414,8 +441,30 @@ def locate_aruco_markers(x: Dict, marker_ids: Optional[np.ndarray] = None):
         # greyscale if need be.
         if image.shape[-1] not in {3, 1}:
             image = image.mean(-1, keepdims=True, dtype=x['image'].dtype)
+        
         if image.dtype != np.uint8:
-            image = np.clip(image * 256., 0, 255).astype(np.uint8)
+            # Normalize image intensity for ArUco detection only.
+            # The original measurement image is not modified.
+            image = image.astype(np.float32)
+
+            # Use the first channel for detection.
+            # For the current UV camera, this provides good
+            # contrast between ArUco marker cells.
+            image = image[..., :1]
+
+            # Normalize using the 99.9th percentile.
+            scale = np.percentile(
+                image, 99.9,
+                axis=(0, 1),
+                keepdims=True
+            )
+            scale = np.maximum(scale, 1e-8)
+
+            image = np.clip(image / scale, 0, 1)
+            image = (image * 255).astype(np.uint8)
+
+        # if image.dtype != np.uint8:
+        #     image = np.clip(image * 256., 0, 255).astype(np.uint8)
 
         for t in range(x['image'].shape[2]):
             pts, ids, _ = detect(image[:, :, t, :])
@@ -438,7 +487,7 @@ def locate_aruco_markers(x: Dict, marker_ids: Optional[np.ndarray] = None):
         try:
             ts, corners, found_ids = zip(*(
                 (t, b, ids) for (t, b, ids) in zip(ts, corners, found_ids)
-                if set(ids) == set(marker_ids)
+                if set(marker_ids).issubset(set(ids))
             ))
         except ValueError:
             raise RuntimeError('Failed to locate markers')

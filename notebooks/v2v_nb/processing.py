@@ -111,9 +111,9 @@ def build_and_run_alignment_pipeline():
     else:
         try:
             align_pipe.run()
-        except v2v.AlignmentNotFound:
-            print('Failed to find alignment. Check inputs.')
-            return
+        except v2v.AlignmentNotFound as err:
+            print(f'Alignment failed: {err}')
+            raise
         except v2v.MisshapenImageError:
             print(
                 'Found image with unexpected shape. (Note: a common cause of '
@@ -251,29 +251,48 @@ def build_and_run_full_pipeline(line_op: v2v.ElementwiseOperator):
     print('Pipeline complete')
 
 
-def build_and_save_alignment_pipeline(warp_op: v2v.Warp):
+
+def build_and_save_alignment_pipeline(
+    warp_op: Optional[v2v.Warp] = None,
+    method: str = "manual"
+):
     '''
-    Builds an alignment pipeline from a coarse :class:`video2vision.Warp`
-    operator and saves to disk.
+    Builds and saves a UV–VIS alignment pipeline.
+
+    Parameters
+    ----------
+    warp_op : v2v.Warp, optional
+        Coarse alignment operator. Required for manual mode.
+    method : str
+        "manual": manual coarse alignment + automatic fine alignment.
+        "aruco": automatic ArUco alignment without manual coarse alignment.
     '''
     config = get_config()
 
-    if warp_op is None:
-        print('Warp operator must be built first.')
+    if method not in ("manual", "aruco"):
+        raise ValueError(f"Unknown alignment method: {method}")
+
+    if method == "manual" and warp_op is None:
+        print("Warp operator must be built first.")
         return
+
     if config['save_align_pipe_path'] is None:
         print('Please specify path to write alignment pipeline to.')
         return
+
     if os.path.exists(config['save_align_pipe_path']):
         print(
             'The alignment pipeline already exists. Cowardly refusing to '
             'overwrite it.'
         )
         return
+
     if config['vis_path'] is None:
         print('Please specify path to visible image.')
         return
+
     out_fmt = config['out_format'].lower()
+
     if not config['build_video_pipeline']:
         if out_fmt == 'mp4':
             print(
@@ -287,44 +306,143 @@ def build_and_save_alignment_pipeline(warp_op: v2v.Warp):
                 f"supported options are {v2v.io._IMAGE_EXTENSIONS}."
             )
             return
+
     if (out_fmt != 'mp4') and config['build_video_pipeline']:
         print('mp4 output format is required when building a video pipeline.')
         return
 
+    # Build alignment operator
     if config['build_video_pipeline']:
+        if method == "aruco":
+            raise ValueError(
+                "ArUco-only mode is currently supported for image "
+                "pipelines, not video pipelines."
+            )
+
         align_op = v2v.AutoTemporalAlign(
-            time_shift_range=[-10, 10], bands=[[0, 1, 2], []]
+            time_shift_range=[-10, 10],
+            bands=[[0, 1, 2], []]
         )
+    # else:
+    #     align_op = v2v.AutoAlign(
+    #         num_votes=4,
+    #         bands=[[0, 1, 2], []],
+    #         method="any" if method == "manual" else "aruco"
+    #     )
     else:
-        align_op = v2v.AutoAlign(num_votes=4, bands=[[0, 1, 2], []])
+        align_op = v2v.AutoAlign(
+            num_votes=4 if method == "manual" else 1,
+            bands=[[0, 1, 2], []],
+            method="any" if method == "manual" else "aruco"
+        )
+
     write_op = v2v.Writer(extension=config['out_format'])
 
     pipe = v2v.Pipeline()
 
     try:
-        uv_loader_idx = pipe.add_operator(v2v.Loader(None, config.image_size))
-        vis_loader_idx = pipe.add_operator(v2v.Loader(None, config.image_size))
+        uv_loader_idx = pipe.add_operator(
+            v2v.Loader(None, config.image_size)
+        )
+        vis_loader_idx = pipe.add_operator(
+            v2v.Loader(None, config.image_size)
+        )
     except ImportError as err:
         print(f'{err.args[0]} Please install the module and try again.')
         return
     except FileNotFoundError as err:
         print(
-            f'Could not find {err.args[0]}. Please correct config and try'
-            f' again.'
+            f'Could not find {err.args[0]}. Please correct config '
+            'and try again.'
         )
         return
 
-    coarse_align_idx = pipe.add_operator(warp_op)
     fine_align_idx = pipe.add_operator(align_op)
+
+    if method == "manual":
+        # Existing workflow: manual coarse alignment
+        coarse_align_idx = pipe.add_operator(warp_op)
+
+        pipe.add_edge(
+            uv_loader_idx, coarse_align_idx, in_slot=0
+        )
+        pipe.add_edge(
+            coarse_align_idx, fine_align_idx, in_slot=0
+        )
+
+    elif method == "aruco":
+        # Automatically flip the UV image vertically
+        width, height = config.image_size
+
+        flip_matrix = np.array([
+            [1,  0,          0],
+            [0, -1, height - 1],
+            [0,  0,          1]
+        ], dtype=np.float32)
+
+        flip_op = v2v.Warp(
+            coe=flip_matrix,
+            output_size=(width, height)
+        )
+
+        flip_idx = pipe.add_operator(flip_op)
+
+        pipe.add_edge(
+            uv_loader_idx, flip_idx, in_slot=0
+        )
+        pipe.add_edge(
+            flip_idx, fine_align_idx, in_slot=0
+        )
+
+    # VIS reference image
+    pipe.add_edge(
+        vis_loader_idx, fine_align_idx, in_slot=1
+    )
+
+    # # Connect UV input: manual mode includes coarse Warp
+    # if method == "manual":
+    #     coarse_align_idx = pipe.add_operator(warp_op)
+
+    #     pipe.add_edge(
+    #         uv_loader_idx,
+    #         coarse_align_idx,
+    #         in_slot=0
+    #     )
+    #     pipe.add_edge(
+    #         coarse_align_idx,
+    #         fine_align_idx,
+    #         in_slot=0
+    #     )
+    # else:
+    #     # ArUco mode: direct UV input to AutoAlign
+    #     pipe.add_edge(
+    #         uv_loader_idx,
+    #         fine_align_idx,
+    #         in_slot=0
+    #     )
+
+    # # VIS reference image
+    # pipe.add_edge(
+    #     vis_loader_idx,
+    #     fine_align_idx,
+    #     in_slot=1
+    # )
+
+    # Output
     write_idx = pipe.add_operator(write_op)
 
-    pipe.add_edge(uv_loader_idx, coarse_align_idx, in_slot=0)
-    pipe.add_edge(coarse_align_idx, fine_align_idx, in_slot=0)
-    pipe.add_edge(vis_loader_idx, fine_align_idx, in_slot=1)
-    pipe.add_edge(fine_align_idx, write_idx, in_slot=0)
+    pipe.add_edge(
+        fine_align_idx,
+        write_idx,
+        in_slot=0
+    )
+
     pipe.save(config['save_align_pipe_path'])
 
-    print('Done! You can close the notebook.')
+    print(
+        f"Done! Saved {method} alignment pipeline to "
+        f"{config['save_align_pipe_path']}"
+    )
 
 
 def build_and_save_autolinearizer(corners: np.ndarray, t: int,
