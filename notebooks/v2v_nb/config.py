@@ -32,6 +32,8 @@ PARAM_TYPES: Dict[str, str] = {
     'uv_aligned_path': 'path',
     'animal_out_path': 'path',
     'human_out_path': 'path',
+    'museum_out_path': 'path',
+    'museum_jpeg_quality': 'int',
     'vis_linearization_path': 'path',
     'uv_linearization_path': 'path',
     'linearization_values_path': 'path',
@@ -75,6 +77,8 @@ PARAM_CAPTIONS: Dict[str, str] = {
     'uv_aligned_path': 'Aligned UV Output Path',
     'animal_out_path': 'Animal Vision Output Path',
     'human_out_path': 'Human Vision Output Path',
+    'museum_out_path': 'Museum output path',
+    'museum_jpeg_quality': 'Museum JPEG quality',
     'vis_linearization_path': 'Visible Linearization Path',
     'uv_linearization_path': 'UV Linearization Path',
     'linearization_values_path': 'Linearization Sample Values Path',
@@ -113,6 +117,9 @@ PARAM_PARSE = {'coe': np.array}
 PARAM_DEFAULTS = {
     'out_format': 'png',
     'batch_size': 4,
+    'human_out_path': None,
+    'museum_out_path': None,
+    'museum_jpeg_quality': 95
 }
 
 
@@ -210,8 +217,8 @@ class Config:
     @property
     def image_size(self) -> Optional[Tuple[int, int]]:
         for k in [
-            'vis_path', 'uv_path', 'uv_aligned_path', 'human_out_path',
-            'animal_out_path',
+            'vis_path', 'uv_path', 'uv_aligned_path', 'human_out_path', 
+            'museum_out_path', 'animal_out_path',
         ]:
             if self[k] is not None:
                 return _get_size(self[k])
@@ -259,7 +266,7 @@ class Config:
                 for k in self._values.keys():
                     if k == 'experiment_name':
                         continue
-                    v = cache.get(k, None)
+                    v = cache.get(k, PARAM_DEFAULTS.get(k, None))
                     if (k in PARAM_PARSE) and (v is not None):
                         v = PARAM_PARSE[k](v)
                     self[k] = v

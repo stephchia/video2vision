@@ -155,7 +155,7 @@ def build_and_run_full_pipeline(line_op: v2v.ElementwiseOperator):
             return
     for k in [
         'align_pipe_path', 'uv_path', 'vis_path', 'animal_out_path',
-        'sense_converter_path', 'human_out_path', 'animal_sensitivity_path',
+        'sense_converter_path', 'animal_sensitivity_path',
     ]:
         if not config[k]:
             print(f'Please specify {PARAM_CAPTIONS[k].lower()}')
@@ -220,17 +220,59 @@ def build_and_run_full_pipeline(line_op: v2v.ElementwiseOperator):
     full_pipe.add_edge(line_idx, sense_idx, in_slot=0)
     full_pipe.add_edge(sense_idx, write_idx, in_slot=0)
 
-    write_op_2 = v2v.Writer(extension=write_op.extension)
-    write_idx_2 = full_pipe.add_operator(write_op_2)
-    sel_idx = full_pipe.add_operator(v2v.ConcatenateOnBands([[1, 2, 3]]))
-    full_pipe.add_edge(line_idx, sel_idx, in_slot=0)
-    full_pipe.add_edge(sel_idx, write_idx_2, in_slot=0)
+    # write_op_2 = v2v.Writer(extension='jpg')
+    # write_idx_2 = full_pipe.add_operator(write_op_2)
+    # sel_idx = full_pipe.add_operator(v2v.ConcatenateOnBands([[1, 2, 3]]))
+    # full_pipe.add_edge(line_idx, sel_idx, in_slot=0)
+    # full_pipe.add_edge(sel_idx, write_idx_2, in_slot=0)
 
+    # full_pipe.set_batch_size(config['batch_size'] // 2)
+    # full_pipe.set_all_paths(
+    #     config['uv_path'], config['vis_path'], config['animal_out_path'],
+    #     config['human_out_path'],
+    # )
+
+    # Required input and output paths
+    paths = [
+        config['uv_path'],
+        config['vis_path'],
+        config['animal_out_path'],
+    ]
+    
+    human_out_path = config['human_out_path']
+    museum_out_path = config['museum_out_path']
+    museum_jpeg_quality = config['museum_jpeg_quality']
+    
+    # Select visible-light channels
+    if human_out_path or museum_out_path:
+        sel_idx = full_pipe.add_operator(
+            v2v.ConcatenateOnBands([[1, 2, 3]])
+        )
+        full_pipe.add_edge(line_idx, sel_idx, in_slot=0)
+    
+    # Original human output
+    if human_out_path:
+        write_op_2 = v2v.Writer(extension='jpg')
+        write_idx_2 = full_pipe.add_operator(write_op_2)
+        full_pipe.add_edge(sel_idx, write_idx_2, in_slot=0)
+    
+        paths.append(human_out_path)
+    
+    # Museum JPEG output
+    if museum_out_path:
+        museum_write_op = v2v.Writer(
+            extension='jpg',
+            museum=True,
+            jpeg_quality=museum_jpeg_quality
+        )
+        museum_write_idx = full_pipe.add_operator(museum_write_op)
+        full_pipe.add_edge(sel_idx, museum_write_idx, in_slot=0)
+    
+        paths.append(museum_out_path)
+    
+    # Configure and run pipeline
     full_pipe.set_batch_size(config['batch_size'] // 2)
-    full_pipe.set_all_paths(
-        config['uv_path'], config['vis_path'], config['animal_out_path'],
-        config['human_out_path'],
-    )
+    full_pipe.set_all_paths(*paths)
 
     try:
         full_pipe.run()
@@ -1096,11 +1138,60 @@ def make_final_displaybox() -> DisplayBox:
 
             return image
 
+    # try:
+        # if config.out_extension.lower().lstrip('.') in {'tif', 'tiff'}:
+        #     for key in ('animal_out_path', 'human_out_path'):
+        #         if config[key] is None:
+        #             raise ParamNotSet(key)
+
+        #     animal = v2v.Loader(
+        #         config['animal_out_path'],
+        #         config.image_size,
+        #         num_channels=config.num_out_bands,
+        #     )
+
+        #     if config.is_3band_out:
+        #         loaders = [TiffPreview(animal)]
+        #     else:
+        #         loaders = [
+        #             TiffPreview(animal, b)
+        #             for b in range(config.num_out_bands)
+        #         ]
+
+        #     # human = TiffPreview(get_loader('human_out_path'))
+        #     human = get_loader('human_out_path')
+
+        # elif config.is_3band_out:
+        #     loaders = [get_loader('animal_out_path')]
+        #     human = get_loader('human_out_path')
+
+        # else:
+        #     # Existing behavior for separate-band outputs.
+        #     n_c = 3 if config.is_video else 1
+        #     loaders = [
+        #         v2v.Loader(
+        #             os.path.join(config['animal_out_path'], f'*_{b}.*'),
+        #             config.image_size,
+        #             num_channels=n_c,
+        #         )
+        #         for b in range(config.num_out_bands)
+        #     ]
+        #     human = get_loader('human_out_path')
+
+        # import ipywidgets as widgets
+
+        # all_loaders = [*loaders, human]
+        # labels = (
+        #     ["Animal view"] if len(loaders) == 1
+        #     else [f"Output band {b}" for b in range(len(loaders))]
+        # ) + ["Human view"]
+
     try:
+        # Load animal-view images
+        if config['animal_out_path'] is None:
+            raise ParamNotSet('animal_out_path')
+
         if config.out_extension.lower().lstrip('.') in {'tif', 'tiff'}:
-            for key in ('animal_out_path', 'human_out_path'):
-                if config[key] is None:
-                    raise ParamNotSet(key)
 
             animal = v2v.Loader(
                 config['animal_out_path'],
@@ -1116,34 +1207,53 @@ def make_final_displaybox() -> DisplayBox:
                     for b in range(config.num_out_bands)
                 ]
 
-            human = TiffPreview(get_loader('human_out_path'))
-
         elif config.is_3band_out:
             loaders = [get_loader('animal_out_path')]
-            human = get_loader('human_out_path')
 
         else:
-            # Existing behavior for separate-band outputs.
             n_c = 3 if config.is_video else 1
             loaders = [
                 v2v.Loader(
-                    os.path.join(config['animal_out_path'], f'*_{b}.*'),
+                    os.path.join(
+                        config['animal_out_path'], f'*_{b}.*'
+                    ),
                     config.image_size,
                     num_channels=n_c,
                 )
                 for b in range(config.num_out_bands)
             ]
-            human = get_loader('human_out_path')
 
         import ipywidgets as widgets
 
-        all_loaders = [*loaders, human]
+        all_loaders = list(loaders)
+
         labels = (
             ["Animal view"] if len(loaders) == 1
             else [f"Output band {b}" for b in range(len(loaders))]
-        ) + ["Human view"]
+        )
 
+        # Load optional human and museum views
+        for key, label in [
+            ('human_out_path', 'Human view'),
+            ('museum_out_path', 'Museum view'),
+        ]:
+            try:
+                path = config[key]
+
+                if not path or not os.path.exists(path):
+                    continue
+
+                loader = get_loader(key)
+
+                if len(loader) > 0:
+                    all_loaders.append(loader)
+                    labels.append(label)
+
+            except (ParamNotSet, FileNotFoundError, KeyError):
+                continue
+                
         views = []
+        
         for loader, label in zip(all_loaders, labels):
             w, h = loader.expected_size
             view = DisplayBox(
