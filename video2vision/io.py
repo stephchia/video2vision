@@ -182,15 +182,21 @@ def save(image: np.ndarray, path: str):
     elif path.lower().endswith(('.tif', '.tiff')):
         if not has_tiff:
             raise ImportError('tifffile is needed to write tif files')
+        # tifffile.imwrite(
+        #     path,
+        #     np.moveaxis(image, -1, 0),
+        #     imagej=True,
+        #     # This specifies metadata to be included that specifies the 0th
+        #     # dimension is the channel dimension. This eliminates an issue
+        #     # where viewer program's interpretation of the image layout is
+        #     # inconsistent.
+        #     metadata={'axes': 'CYX'},
+        # )
         tifffile.imwrite(
             path,
-            np.moveaxis(image, -1, 0),
-            imagej=True,
-            # This specifies metadata to be included that specifies the 0th
-            # dimension is the channel dimension. This eliminates an issue
-            # where viewer program's interpretation of the image layout is
-            # inconsistent.
-            metadata={'axes': 'CYX'},
+            (image).astype(np.float16),
+            compression="zstd",
+            predictor=3
         )
 
     elif path.lower().endswith(('.nef', '.arw')):
@@ -199,6 +205,39 @@ def save(image: np.ndarray, path: str):
     else:
         image = np.clip(image, 0, 255).astype(np.uint8)
         return cv2.imwrite(path, image)
+
+def save_museum_jpeg(image, path, quality=95,
+                     gamma=1.8, sat_mult=1.35):
+    """
+    Save a linear three-channel BGR image as a
+    display-ready JPEG for museum databases.
+
+    Input values are expected to be in [0, 1].
+    """
+    image = np.asarray(image, dtype=np.float32)
+    image = np.clip(image, 0, 1)
+
+    # Apply gamma correction
+    image = np.power(image, 1 / gamma)
+
+    # Adjust saturation
+    hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+    hsv[..., 1] *= sat_mult
+    hsv[..., 1] = np.clip(hsv[..., 1], 0, 1)
+    image = cv2.cvtColor(hsv, cv2.COLOR_HSV2BGR)
+
+    # Convert to 8-bit
+    image = np.round(np.clip(image, 0, 1) * 255).astype(np.uint8)
+
+    # Save high-quality JPEG
+    success = cv2.imwrite(
+        str(path),
+        image,
+        [cv2.IMWRITE_JPEG_QUALITY, quality]
+    )
+
+    if not success:
+        raise IOError(f"Could not save image: {path}")
 
 
 @OPERATOR_REGISTRY.register
@@ -443,7 +482,8 @@ class Writer(Operator):
 
     def __init__(self, path: Optional[str] = None,
                  extension: Optional[str] = None,
-                 separate_bands: bool = False, suffix: str = ''):
+                 separate_bands: bool = False, suffix: str = '',
+                 museum=False, jpeg_quality=95):
         '''
         Args:
             path (str): Path to the directory to write images to.
@@ -457,6 +497,7 @@ class Writer(Operator):
             suffix (str): Append this to the end of output file names. This is
             only used if the output path is a directory, not an MP4.
         '''
+        
         if extension is None:
             # Check for extension in path
             _, extension = os.path.splitext(path or '')
@@ -475,6 +516,8 @@ class Writer(Operator):
         # writing to disk. It is only used if the global variable
         # _READ_WRITE_FROM_BUFFER is true.
         self.buff = []
+        self.museum = museum
+        self.jpeg_quality = jpeg_quality
 
     def apply(self, x: Dict):
         image = x['image']
@@ -553,7 +596,14 @@ class Writer(Operator):
             else:
                 if os.path.exists(path):
                     raise FileExistsError(path)
-                save(image, path)
+                if self.museum:
+                    save_museum_jpeg(
+                        image,
+                        path,
+                        quality=self.jpeg_quality
+                    )
+                else:
+                    save(image, path)
 
     def release(self):
         '''
